@@ -142,20 +142,26 @@ fi
 #Help Text:
 function helptext() {
 echo -e "\nScanCannon: a program to enumerate and parse a large range of public networks, primarily for determining potential attack vectors"
-echo "usage: scancannon.sh [-u] [-a] -d domain | -c CIDR  (at least one required)"
+echo "usage: scancannon.sh [-u] [-a] -d domain | -c CIDR | -f file  (at least one required)"
 echo ""
 echo "  -d domain  Resolve a domain to its owning CIDR range via whois (repeatable)"
 echo "             Accepts a bare domain (example.com) or URL (https://sub.example.com/path)"
 echo "             URLs are automatically stripped to domain + TLD"
 echo "  -c CIDR    Specify a CIDR range directly (repeatable)"
+echo "  -f file    Read CIDR ranges from a file, one per line (repeatable)"
+echo "             Blank lines and lines beginning with '#' are ignored"
+echo "             File entries are scanned as-is (ASN discovery is skipped)"
+echo "  -F         Force ASN-based network discovery on -f file entries"
+echo "             (default: file entries scan as-is; use -F to expand them)"
 echo "  -u         Perform UDP scan on common ports (53, 161, 500) using nmap"
 echo "  -a         Perform API endpoint detection on HTTP/HTTPS services (requires curl)"
 echo ""
-echo "  At least one -d or -c flag is required. You may combine both."
+echo "  At least one -d, -c, or -f flag is required. You may combine them."
 echo "  Examples:"
 echo "    scancannon.sh -d example.com"
 echo "    scancannon.sh -c 203.0.113.0/24"
-echo "    scancannon.sh -d https://example.com -c 10.0.0.0/24"
+echo "    scancannon.sh -f CIDRs.txt"
+echo "    scancannon.sh -d https://example.com -c 10.0.0.0/24 -f CIDRs.txt"
 echo "    scancannon.sh -ua -d example.com"
 }
 
@@ -1055,10 +1061,12 @@ configure_adapter
 #Parse command line options
 UDP_SCAN=0
 API_SCAN=0
+FORCE_FILE_DISCOVERY=0
 DOMAIN_ARGS=()
 CIDR_FLAG_ARGS=()
+CIDR_FILE_ARGS=()
 
-while getopts ":uad:c:" opt; do
+while getopts ":uaFd:c:f:" opt; do
 case ${opt} in
 u )
 UDP_SCAN=1
@@ -1066,11 +1074,17 @@ UDP_SCAN=1
 a )
 API_SCAN=1
 ;;
+F )
+FORCE_FILE_DISCOVERY=1
+;;
 d )
 DOMAIN_ARGS+=("$OPTARG")
 ;;
 c )
 CIDR_FLAG_ARGS+=("$OPTARG")
+;;
+f )
+CIDR_FILE_ARGS+=("$OPTARG")
 ;;
 : )
 echo "ERROR: Option -$OPTARG requires an argument." 1>&2
@@ -1109,12 +1123,64 @@ if [ "$#" -gt 0 ]; then
     exit 1
 fi
 
-# Require at least one -d or -c flag
-if [ ${#DOMAIN_ARGS[@]} -eq 0 ] && [ ${#CIDR_FLAG_ARGS[@]} -eq 0 ]; then
-    echo "ERROR: At least one -d (domain) or -c (CIDR) flag is required."
+# Expand -f file arguments. By default file entries skip ASN discovery and are
+# scanned as-is; pass -F to run them through the same discovery pipeline as -c.
+FILE_DIRECT_RANGES=()
+if [ ${#CIDR_FILE_ARGS[@]} -gt 0 ]; then
+    for cidr_file in "${CIDR_FILE_ARGS[@]}"; do
+        if [ ! -f "$cidr_file" ]; then
+            echo "ERROR: CIDR file '$cidr_file' not found."
+            exit 1
+        fi
+        if [ ! -r "$cidr_file" ]; then
+            echo "ERROR: CIDR file '$cidr_file' is not readable."
+            exit 1
+        fi
+        file_line_num=0
+        file_entries=0
+        while IFS= read -r file_line || [ -n "$file_line" ]; do
+            file_line_num=$((file_line_num + 1))
+            # Strip leading/trailing whitespace
+            file_line="${file_line#"${file_line%%[![:space:]]*}"}"
+            file_line="${file_line%"${file_line##*[![:space:]]}"}"
+            # Skip blanks and comments
+            if [ -z "$file_line" ] || [[ "$file_line" =~ ^# ]]; then
+                continue
+            fi
+            # Validate each line up-front for clear error reporting with file/line context
+            if ! validate_cidr "$file_line" "$file_line_num" "$cidr_file"; then
+                exit 1
+            fi
+            # Normalize bare IPs to /32
+            if echo "$file_line" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                file_line="$file_line/32"
+            fi
+            if [ "$FORCE_FILE_DISCOVERY" -eq 1 ]; then
+                CIDR_FLAG_ARGS+=("$file_line")
+            else
+                FILE_DIRECT_RANGES+=("$file_line")
+            fi
+            file_entries=$((file_entries + 1))
+        done < "$cidr_file"
+        if [ "$FORCE_FILE_DISCOVERY" -eq 1 ]; then
+            echo "Loaded $file_entries CIDR entrie(s) from $cidr_file (ASN discovery forced via -F)"
+        else
+            echo "Loaded $file_entries CIDR entrie(s) from $cidr_file (scanning as-is; pass -F to force ASN discovery)"
+        fi
+    done
+fi
+
+# Require at least one -d, -c, or -f flag
+if [ ${#DOMAIN_ARGS[@]} -eq 0 ] && [ ${#CIDR_FLAG_ARGS[@]} -eq 0 ] && [ ${#FILE_DIRECT_RANGES[@]} -eq 0 ]; then
+    echo "ERROR: At least one -d (domain), -c (CIDR), or -f (CIDR file) flag is required."
     helptext >&2
     exit 1
 fi
+
+# File entries (no discovery) feed directly into the final scan list
+for range in "${FILE_DIRECT_RANGES[@]}"; do
+    CIDR_RANGES+=("$range")
+done
 
 # 1) Process -d (domain) flags — full ASN discovery pipeline
 if [ ${#DOMAIN_ARGS[@]} -gt 0 ]; then

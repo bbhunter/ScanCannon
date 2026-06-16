@@ -79,18 +79,20 @@ ScanCannon focuses on these high-value services for security assessment:
 ### Command Syntax
 
 ```bash
-sudo ./scancannon.sh [-u] [-a] <-d domain | -c CIDR> [...]
+sudo ./scancannon.sh [-u] [-a] <-d domain | -c CIDR | -f file> [...]
 ```
 
-At least one `-d` or `-c` flag is **required**. Both flags are repeatable and can be combined.
+At least one `-d`, `-c`, or `-f` flag is **required**. All three flags are repeatable and can be combined.
 
 **Options:**
 - `-d domain` : Discover all networks for a domain (resolves all A records → whois → ASN → RADB prefix lookup; repeatable; accepts URLs too)
 - `-c CIDR` : Discover all networks related to a CIDR (whois → ASN → RADB prefix lookup; repeatable)
+- `-f file` : Read CIDR ranges from a file (one per line, blank lines and `#` comments ignored; repeatable). Entries are scanned **as-is** — ASN discovery is skipped by default so curated lists don't get expanded into parent prefixes or trigger an interactive prompt per line.
+- `-F` : Force ASN-based network discovery on `-f` file entries (treats each line like `-c`). Off by default.
 - `-u` : Perform UDP scan on common ports (53, 161, 500) using nmap (significantly slower)
 - `-a` : Perform API endpoint detection on HTTP/HTTPS services (requires `curl`)
 
-Both `-d` and `-c` run full ASN-based network discovery and present an interactive selection menu where you choose which discovered ranges to scan.
+`-d` and `-c` run full ASN-based network discovery and present an interactive selection menu for each input. `-f` skips that step by default; pass `-F` to opt in.
 
 ### Examples
 
@@ -101,8 +103,11 @@ sudo ./scancannon.sh -c 203.0.113.0/24
 # Discover all networks for a domain (resolves all IPs → ASN → all announced prefixes)
 sudo ./scancannon.sh -d example.com
 
-# Combine domain + CIDR (both are scanned)
-sudo ./scancannon.sh -d example.com -c 10.0.0.0/24
+# Scan networks listed in a file (one CIDR per line)
+sudo ./scancannon.sh -f CIDRs.txt
+
+# Combine domain + CIDR + file (all are scanned)
+sudo ./scancannon.sh -d example.com -c 10.0.0.0/24 -f CIDRs.txt
 
 # Include UDP scanning (slower but more comprehensive)
 sudo ./scancannon.sh -u -d example.com
